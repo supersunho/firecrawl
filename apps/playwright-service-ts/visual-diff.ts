@@ -1,6 +1,4 @@
-// Utility for visual regression testing and change detection using pixelmatch
 import { Page } from "playwright";
-import pixelmatch from "pixelmatch";
 import { PNG } from "pngjs";
 
 export interface DiffResult {
@@ -18,6 +16,10 @@ export class VisualDiffDetector {
 	 * @param threshold Sensitivity threshold (0 to 1, smaller is more sensitive)
 	 */
 	async detectChange(page: Page, previousScreenshot?: Buffer, threshold: number = 0.1): Promise<DiffResult> {
+		// ✅ Use dynamic import to support ESM-only pixelmatch in CommonJS environment
+		// ✅ eval('import(...)') is used to prevent TypeScript from compiling it back to require()
+		const { default: pixelmatch } = await (eval('import("pixelmatch")') as Promise<any>);
+
 		// Capture full page screenshot
 		const currentScreenshot = await page.screenshot({ fullPage: true });
 
@@ -36,7 +38,7 @@ export class VisualDiffDetector {
 			const { width, height } = img1;
 			const diff = new PNG({ width, height });
 
-			// Compare pixels
+			// Compare pixels using the dynamically loaded pixelmatch
 			const numDiffPixels = pixelmatch(img1.data, img2.data, diff.data, width, height, { threshold });
 
 			const diffPercent = (numDiffPixels / (width * height)) * 100;
