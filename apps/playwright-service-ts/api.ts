@@ -5,6 +5,7 @@ import dotenv from "dotenv";
 import UserAgent from "user-agents";
 import { getError } from "./helpers/get_error";
 import { FlareSolverrClient } from "./flaresolverr";
+import { ScraperCache } from "./cache"; // Import the caching utility
 
 dotenv.config();
 
@@ -25,12 +26,19 @@ const ENABLE_CLOUDFLARE_BYPASS = (process.env.ENABLE_CLOUDFLARE_BYPASS || "false
 const FLARESOLVERR_URL = process.env.FLARESOLVERR_URL || "http://flaresolverr:8191";
 const FLARESOLVERR_TIMEOUT = parseInt(process.env.FLARESOLVERR_TIMEOUT || "60000", 10);
 
+// ✅ Added Cache configuration via environment variables
+const CACHE_ENABLED = (process.env.CACHE_ENABLED || "false").toLowerCase() === "true";
+
 // ✅ Initialize FlareSolverr client
 let flareSolverr: FlareSolverrClient | null = null;
 if (ENABLE_CLOUDFLARE_BYPASS) {
 	flareSolverr = new FlareSolverrClient(FLARESOLVERR_URL, FLARESOLVERR_TIMEOUT);
 	console.log("[Playwright] ✓ FlareSolverr integration enabled");
 }
+
+// ✅ Initialize Cache client
+const cache = new ScraperCache();
+console.log(`[Playwright] Cache system: ${cache.isEnabled() ? "✅ ENABLED" : "❌ DISABLED"}`);
 
 class Semaphore {
 	private permits: number;
@@ -97,18 +105,20 @@ interface UrlModel {
 	skip_tls_verification?: boolean;
 	bypass_cloudflare?: boolean;
 	cookies?: any[];
+	use_cache?: boolean; // Parameter to toggle cache per request
 }
 
 let browser: Browser;
 
 const initializeBrowser = async () => {
-	browser = await chromium.launch({
-		headless: true,
-		args: ["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage", "--disable-accelerated-2d-canvas", "--no-first-run", "--no-zygote", "--disable-gpu"],
-	});
+	if (!browser) {
+		browser = await chromium.launch({
+			headless: true,
+			args: ["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage", "--disable-accelerated-2d-canvas", "--no-first-run", "--no-zygote", "--disable-gpu"],
+		});
+	}
 };
 
-// ✅ Added userAgent and cookies parameters to createContext
 const createContext = async (skipTlsVerification: boolean = false, customUserAgent?: string, cookies?: any[]) => {
 	const userAgent = customUserAgent || new UserAgent().toString();
 	const viewport = { width: 1280, height: 800 };
@@ -133,7 +143,6 @@ const createContext = async (skipTlsVerification: boolean = false, customUserAge
 
 	const newContext = await browser.newContext(contextOptions);
 
-	// ✅ Cookie injection
 	if (cookies && cookies.length > 0) {
 		await newContext.addCookies(cookies);
 		console.log(`[Playwright] ✓ Injected ${cookies.length} cookies`);
@@ -145,13 +154,11 @@ const createContext = async (skipTlsVerification: boolean = false, customUserAge
 		});
 	}
 
-	// Intercept all requests to avoid loading ads
 	await newContext.route("**/*", (route: Route, request: PlaywrightRequest) => {
 		const requestUrl = new URL(request.url());
 		const hostname = requestUrl.hostname;
 
 		if (AD_SERVING_DOMAINS.some(domain => hostname.includes(domain))) {
-			console.log(hostname);
 			return route.abort();
 		}
 		return route.continue();
@@ -175,7 +182,6 @@ const isValidUrl = (urlString: string): boolean => {
 	}
 };
 
-// ✅ Convert FlareSolverr cookies to Playwright format
 const convertFlareSolverrCookies = (cookies: any[], url: string) => {
 	const urlObj = new URL(url);
 	return cookies.map(cookie => ({
@@ -241,6 +247,7 @@ app.get("/health", async (req: Request, res: Response) => {
 			maxConcurrentPages: MAX_CONCURRENT_PAGES,
 			activePages: MAX_CONCURRENT_PAGES - pageSemaphore.getAvailablePermits(),
 			flareSolverrEnabled: ENABLE_CLOUDFLARE_BYPASS,
+			cacheEnabled: CACHE_ENABLED,
 		});
 	} catch (error) {
 		console.error("Health check failed:", error);
@@ -252,7 +259,17 @@ app.get("/health", async (req: Request, res: Response) => {
 });
 
 app.post("/scrape", async (req: Request, res: Response) => {
-	const { url, wait_after_load = 0, timeout = 15000, headers, check_selector, skip_tls_verification = false, bypass_cloudflare = ENABLE_CLOUDFLARE_BYPASS, cookies }: UrlModel = req.body;
+	const {
+		url,
+		wait_after_load = 0,
+		timeout = 15000,
+		headers,
+		check_selector,
+		skip_tls_verification = false,
+		bypass_cloudflare = ENABLE_CLOUDFLARE_BYPASS,
+		cookies,
+		use_cache = CACHE_ENABLED,
+	}: UrlModel = req.body;
 
 	console.log(`================= Scrape Request =================`);
 	console.log(`URL: ${url}`);
@@ -262,14 +279,21 @@ app.post("/scrape", async (req: Request, res: Response) => {
 	console.log(`Check Selector: ${check_selector ? check_selector : "None"}`);
 	console.log(`Skip TLS Verification: ${skip_tls_verification}`);
 	console.log(`Bypass Cloudflare: ${bypass_cloudflare}`);
+	console.log(`Use Cache: ${use_cache}`); // Added for visibility
 	console.log(`==================================================`);
 
-	if (!url) {
-		return res.status(400).json({ error: "URL is required" });
+	if (!url || !isValidUrl(url)) {
+		return res.status(400).json({ error: "Valid URL is required" });
 	}
 
-	if (!isValidUrl(url)) {
-		return res.status(400).json({ error: "Invalid URL" });
+	// ✅ 1. Check Redis Cache before proceeding
+	const cacheKey = { bypass_cloudflare, headers, check_selector, wait_after_load };
+	if (use_cache && cache.isEnabled()) {
+		const cachedData = await cache.get(url, cacheKey);
+		if (cachedData) {
+			console.log(`[Cache] Serving cached content for: ${url}`);
+			return res.json({ ...cachedData, cached: true });
+		}
 	}
 
 	if (!PROXY_SERVER) {
@@ -284,13 +308,10 @@ app.post("/scrape", async (req: Request, res: Response) => {
 
 	let requestContext: BrowserContext | null = null;
 	let page: Page | null = null;
-
-	// ✅ FlareSolverr integration
 	let injectedCookies: any[] = cookies || [];
 	let customUserAgent: string | undefined = undefined;
 
 	try {
-		// ✅ Attempt Cloudflare bypass
 		if (bypass_cloudflare && flareSolverr && ENABLE_CLOUDFLARE_BYPASS) {
 			console.log("[Playwright] 🔥 Attempting Cloudflare bypass with FlareSolverr...");
 
@@ -308,7 +329,6 @@ app.post("/scrape", async (req: Request, res: Response) => {
 			}
 		}
 
-		// ✅ Create context with cookies and User-Agent
 		requestContext = await createContext(skip_tls_verification, customUserAgent, injectedCookies);
 		page = await requestContext.newPage();
 
@@ -319,19 +339,27 @@ app.post("/scrape", async (req: Request, res: Response) => {
 		const result = await scrapePage(page, url, "load", wait_after_load, timeout, check_selector);
 		const pageError = result.status !== 200 ? getError(result.status) : undefined;
 
+		const responseData = {
+			content: result.content,
+			pageStatusCode: result.status,
+			contentType: result.contentType,
+			cookiesUsed: injectedCookies.length,
+			cached: false,
+			...(pageError && { pageError }),
+		};
+
+		// ✅ 2. Save successful responses to Cache
+		if (result.status === 200 && use_cache && cache.isEnabled()) {
+			await cache.set(url, responseData, cacheKey);
+		}
+
 		if (!pageError) {
 			console.log(`✅ Scrape successful!`);
 		} else {
 			console.log(`🚨 Scrape failed with status code: ${result.status} ${pageError}`);
 		}
 
-		res.json({
-			content: result.content,
-			pageStatusCode: result.status,
-			contentType: result.contentType,
-			cookiesUsed: injectedCookies.length,
-			...(pageError && { pageError }),
-		});
+		res.json(responseData);
 	} catch (error) {
 		console.error("Scrape error:", error);
 		res.status(500).json({ error: "An error occurred while fetching the page." });
@@ -351,9 +379,11 @@ app.listen(port, () => {
 
 if (require.main === module) {
 	process.on("SIGINT", () => {
-		shutdownBrowser().then(() => {
-			console.log("Browser closed");
-			process.exit(0);
+		cache.close().then(() => {
+			shutdownBrowser().then(() => {
+				console.log("Browser and Cache connection closed");
+				process.exit(0);
+			});
 		});
 	});
 }

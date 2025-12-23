@@ -74,6 +74,14 @@ services:
       MAX_CONCURRENT_PAGES: ${CRAWL_CONCURRENT_REQUESTS:-10}
       FLARESOLVERR_URL: http://flaresolverr:8191
       ENABLE_CLOUDFLARE_BYPASS: true
+      REDIS_URL: redis://redis:6379
+      CACHE_ENABLED: true
+      CACHE_TTL: 3600
+    depends_on:
+      redis:
+        condition: service_started
+      flaresolverr:
+        condition: service_started
     # Resource limits for Docker Compose (not Swarm)
     cpus: 2.0
     mem_limit: 4G
@@ -150,7 +158,11 @@ services:
       - backend # Internal communication only
     volumes:
       - redis_data:/data
-    command: redis-server --bind 0.0.0.0
+    command: redis-server --bind 0.0.0.0 --appendonly yes --maxmemory 512mb --maxmemory-policy allkeys-lru
+    deploy:
+      resources:
+        limits:
+          memory: 512M
     logging:
       driver: "json-file"
       options:
