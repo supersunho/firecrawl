@@ -5,7 +5,8 @@ import dotenv from "dotenv";
 import UserAgent from "user-agents";
 import { getError } from "./helpers/get_error";
 import { FlareSolverrClient } from "./flaresolverr";
-import { ScraperCache } from "./cache"; // Import the caching utility
+import { ScraperCache } from "./cache";
+import { RetryHandler } from "./retry";
 
 dotenv.config();
 
@@ -39,6 +40,9 @@ if (ENABLE_CLOUDFLARE_BYPASS) {
 // ✅ Initialize Cache client
 const cache = new ScraperCache();
 console.log(`[Playwright] Cache system: ${cache.isEnabled() ? "✅ ENABLED" : "❌ DISABLED"}`);
+
+// ✅ Initialize Retry Handler
+const retryHandler = new RetryHandler();
 
 class Semaphore {
 	private permits: number;
@@ -105,7 +109,8 @@ interface UrlModel {
 	skip_tls_verification?: boolean;
 	bypass_cloudflare?: boolean;
 	cookies?: any[];
-	use_cache?: boolean; // Parameter to toggle cache per request
+	use_cache?: boolean;
+	max_retries?: number; // ✅ Added max_retries parameter
 }
 
 let browser: Browser;
@@ -223,6 +228,13 @@ const scrapePage = async (page: Page, url: string, waitUntil: "load" | "networki
 		}
 	}
 
+	// ✅ If status code indicates temporary error, throw for RetryHandler to catch
+	if (response && (response.status() === 429 || (response.status() >= 500 && response.status() < 600))) {
+		const error: any = new Error(`Scrape failed with retryable status: ${response.status()}`);
+		error.status = response.status();
+		throw error;
+	}
+
 	return {
 		content,
 		status: response ? response.status() : null,
@@ -269,6 +281,7 @@ app.post("/scrape", async (req: Request, res: Response) => {
 		bypass_cloudflare = ENABLE_CLOUDFLARE_BYPASS,
 		cookies,
 		use_cache = CACHE_ENABLED,
+		max_retries, // ✅ Added for per-request retry control
 	}: UrlModel = req.body;
 
 	console.log(`================= Scrape Request =================`);
@@ -279,14 +292,14 @@ app.post("/scrape", async (req: Request, res: Response) => {
 	console.log(`Check Selector: ${check_selector ? check_selector : "None"}`);
 	console.log(`Skip TLS Verification: ${skip_tls_verification}`);
 	console.log(`Bypass Cloudflare: ${bypass_cloudflare}`);
-	console.log(`Use Cache: ${use_cache}`); // Added for visibility
+	console.log(`Use Cache: ${use_cache}`);
 	console.log(`==================================================`);
 
 	if (!url || !isValidUrl(url)) {
 		return res.status(400).json({ error: "Valid URL is required" });
 	}
 
-	// ✅ 1. Check Redis Cache before proceeding
+	// ✅ 1. Check Redis Cache
 	const cacheKey = { bypass_cloudflare, headers, check_selector, wait_after_load };
 	if (use_cache && cache.isEnabled()) {
 		const cachedData = await cache.get(url, cacheKey);
@@ -336,7 +349,9 @@ app.post("/scrape", async (req: Request, res: Response) => {
 			await page.setExtraHTTPHeaders(headers);
 		}
 
-		const result = await scrapePage(page, url, "load", wait_after_load, timeout, check_selector);
+		// ✅ 2. Execute scraping with Retry Logic
+		const result = await retryHandler.execute(() => scrapePage(page!, url, "load", wait_after_load, timeout, check_selector), `Scrape: ${url}`);
+
 		const pageError = result.status !== 200 ? getError(result.status) : undefined;
 
 		const responseData = {
@@ -348,7 +363,7 @@ app.post("/scrape", async (req: Request, res: Response) => {
 			...(pageError && { pageError }),
 		};
 
-		// ✅ 2. Save successful responses to Cache
+		// ✅ 3. Save to Cache
 		if (result.status === 200 && use_cache && cache.isEnabled()) {
 			await cache.set(url, responseData, cacheKey);
 		}
@@ -360,9 +375,9 @@ app.post("/scrape", async (req: Request, res: Response) => {
 		}
 
 		res.json(responseData);
-	} catch (error) {
-		console.error("Scrape error:", error);
-		res.status(500).json({ error: "An error occurred while fetching the page." });
+	} catch (error: any) {
+		console.error("Scrape error after retries:", error.message);
+		res.status(500).json({ error: error.message || "An error occurred while fetching the page." });
 	} finally {
 		if (page) await page.close();
 		if (requestContext) await requestContext.close();
