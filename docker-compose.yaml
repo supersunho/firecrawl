@@ -5,13 +5,13 @@ x-common-service: &common-service
   # comment out the build: statement and uncomment the image: statement
   # image: ghcr.io/firecrawl/firecrawl
   build: apps/api
-
+  networks:
+    - backend # Internal network
+    - npm-net # For NPM access
   ulimits:
     nofile:
       soft: 65535
       hard: 65535
-  networks:
-    - backend
   extra_hosts:
     - "host.docker.internal:host-gateway"
   logging:
@@ -38,8 +38,8 @@ x-common-env: &common-env
   OPENAI_API_KEY: ${OPENAI_API_KEY}
   OPENAI_BASE_URL: ${OPENAI_BASE_URL}
   MODEL_NAME: ${MODEL_NAME}
-  MODEL_EMBEDDING_NAME: ${MODEL_EMBEDDING_NAME} 
-  OLLAMA_BASE_URL: ${OLLAMA_BASE_URL} 
+  MODEL_EMBEDDING_NAME: ${MODEL_EMBEDDING_NAME}
+  OLLAMA_BASE_URL: ${OLLAMA_BASE_URL}
   SLACK_WEBHOOK_URL: ${SLACK_WEBHOOK_URL}
   BULL_AUTH_KEY: ${BULL_AUTH_KEY}
   TEST_API_KEY: ${TEST_API_KEY}
@@ -61,6 +61,9 @@ services:
     # comment out the build: statement and uncomment the image: statement
     # image: ghcr.io/firecrawl/playwright-service:latest
     build: apps/playwright-service-ts
+    container_name: firecrawl_playwright
+    networks:
+      - backend # Internal communication only
     environment:
       PORT: 3000
       PROXY_SERVER: ${PROXY_SERVER}
@@ -69,8 +72,8 @@ services:
       BLOCK_MEDIA: ${BLOCK_MEDIA}
       # Configure maximum concurrent pages for Playwright browser instances
       MAX_CONCURRENT_PAGES: ${CRAWL_CONCURRENT_REQUESTS:-10}
-    networks:
-      - backend
+      FLARESOLVERR_URL: http://flaresolverr:8191
+      ENABLE_CLOUDFLARE_BYPASS: true
     # Resource limits for Docker Compose (not Swarm)
     cpus: 2.0
     mem_limit: 4G
@@ -83,9 +86,30 @@ services:
         compress: "true"
     tmpfs:
       - /tmp/.cache:noexec,nosuid,size=1g
-
+  # ========== Additional FlareSolverr ==========
+  flaresolverr:
+    image: ghcr.io/flaresolverr/flaresolverr:latest
+    container_name: firecrawl_flaresolverr
+    environment:
+      - LOG_LEVEL=${LOG_LEVEL:-info}
+      - LOG_HTML=${LOG_HTML:-false}
+      - TZ=Asia/Seoul
+      - CAPTCHA_SOLVER=${CAPTCHA_SOLVER:-none}
+    ports:
+      - "8191:8191"
+    restart: unless-stopped
+    networks:
+      - backend
+    # ARM64 optimization
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+        reservations:
+          memory: 1G
   api:
     <<: *common-service
+    container_name: firecrawl_api
     environment:
       <<: *common-env
       HOST: "0.0.0.0"
@@ -94,10 +118,18 @@ services:
       WORKER_PORT: ${WORKER_PORT:-3005}
       NUQ_RABBITMQ_URL: amqp://rabbitmq:5672
       ENV: local
+      FLARESOLVERR_URL: http://flaresolverr:8191
     depends_on:
-      - redis
-      - playwright-service
-      - rabbitmq
+      redis:
+        condition: service_started
+      playwright-service:
+        condition: service_started
+      rabbitmq:
+        condition: service_healthy
+      nuq-postgres:
+        condition: service_started
+      searxng:
+        condition: service_started
     ports:
       - "${PORT:-3002}:${INTERNAL_PORT:-3002}"
     command: node dist/src/harness.js --start-docker
@@ -112,10 +144,12 @@ services:
     # uncomment the Valkey statement and comment out the Redis statement.
     # Using Valkey with Firecrawl is untested and not guaranteed to work. Use with caution.
     image: redis:alpine
+    container_name: firecrawl_redis
     # image: valkey/valkey:alpine
-
     networks:
-      - backend
+      - backend # Internal communication only
+    volumes:
+      - redis_data:/data
     command: redis-server --bind 0.0.0.0
     logging:
       driver: "json-file"
@@ -123,27 +157,37 @@ services:
         max-size: "5m"
         max-file: "2"
         compress: "true"
-    
+
   rabbitmq:
     image: rabbitmq:3-management
+    container_name: firecrawl_rabbitmq
     networks:
-      - backend
+      - backend # Internal communication only
     command: rabbitmq-server
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "check_running"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 5s
     logging:
       driver: "json-file"
       options:
         max-size: "5m"
         max-file: "2"
         compress: "true"
-  
+
   nuq-postgres:
     build: apps/nuq-postgres
+    container_name: firecrawl_postgres
+    networks:
+      - backend # Internal communication only
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-postgres}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
       POSTGRES_DB: ${POSTGRES_DB:-postgres}
-    networks:
-      - backend
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
     logging:
       driver: "json-file"
       options:
@@ -151,6 +195,48 @@ services:
         max-file: "3"
         compress: "true"
 
+  searxng:
+    image: searxng/searxng:latest
+    container_name: firecrawl_searxng
+    ports:
+      - "${SEARXNG_PORT:-8080}:8080"
+    environment:
+      - SEARXNG_BASE_URL=${SEARXNG_BASE_URL:-http://localhost:8080/}
+      - SEARXNG_BIND_ADDRESS=0.0.0.0:8080
+      - SEARXNG_SECRET=${SEARXNG_SECRET}
+    volumes:
+      - searxng_config:/etc/searxng
+      - searxng_data:/var/cache/searxng
+    networks:
+      - backend # Required for Firecrawl to access
+      - npm-net # For external access (optional)
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+      - SETGID
+      - SETUID
+      - DAC_OVERRIDE
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+        compress: "true"
+    restart: always
+
+volumes:
+  postgres_data:
+    driver: local
+  redis_data:
+    driver: local
+  searxng_config:
+    driver: local
+  searxng_data:
+    driver: local
+
 networks:
   backend:
     driver: bridge
+  npm-net:
+    external: true
