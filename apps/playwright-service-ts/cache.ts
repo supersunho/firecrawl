@@ -6,7 +6,8 @@ export interface CacheOptions {
 }
 
 export class ScraperCache {
-	private redis: Redis;
+	// ✅ Change type to include null and initialize with null to satisfy TS compiler
+	private redis: Redis | null = null;
 	private enabled: boolean;
 	private defaultTTL: number;
 
@@ -15,7 +16,7 @@ export class ScraperCache {
 		this.defaultTTL = parseInt(process.env.CACHE_TTL || "3600", 10);
 
 		if (this.enabled) {
-			// Use existing Redis service defined in docker-compose
+			// Initialize only if enabled
 			this.redis = new Redis(process.env.REDIS_URL || "redis://redis:6379", {
 				retryStrategy: times => Math.min(times * 50, 2000),
 				maxRetriesPerRequest: 3,
@@ -34,7 +35,8 @@ export class ScraperCache {
 	}
 
 	async get(url: string, options?: Record<string, any>): Promise<any | null> {
-		if (!this.enabled) return null;
+		// ✅ Check if redis instance exists before use
+		if (!this.enabled || !this.redis) return null;
 		try {
 			const key = this.generateKey(url, options);
 			const cached = await this.redis.get(key);
@@ -50,7 +52,8 @@ export class ScraperCache {
 	}
 
 	async set(url: string, data: any, options?: Record<string, any>, cacheOptions?: CacheOptions): Promise<void> {
-		if (!this.enabled) return;
+		// ✅ Check if redis instance exists before use
+		if (!this.enabled || !this.redis) return;
 		try {
 			const key = this.generateKey(url, options);
 			const ttl = cacheOptions?.ttl || this.defaultTTL;
@@ -62,10 +65,12 @@ export class ScraperCache {
 	}
 
 	isEnabled(): boolean {
-		return this.enabled;
+		return this.enabled && this.redis !== null;
 	}
 
 	async close(): Promise<void> {
-		if (this.enabled && this.redis) await this.redis.quit();
+		if (this.enabled && this.redis) {
+			await this.redis.quit();
+		}
 	}
 }
