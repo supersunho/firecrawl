@@ -7,6 +7,7 @@ import { getError } from "./helpers/get_error";
 import { FlareSolverrClient } from "./flaresolverr";
 import { ScraperCache } from "./cache";
 import { RetryHandler } from "./retry";
+import { VisualDiffDetector } from "./visual-diff";
 
 dotenv.config();
 
@@ -30,6 +31,9 @@ const FLARESOLVERR_TIMEOUT = parseInt(process.env.FLARESOLVERR_TIMEOUT || "60000
 // ✅ Added Cache configuration via environment variables
 const CACHE_ENABLED = (process.env.CACHE_ENABLED || "false").toLowerCase() === "true";
 
+// ✅ Added Visual Check configuration via environment variables
+const VISUAL_CHECK_ENABLED = (process.env.VISUAL_CHECK_ENABLED || "false").toLowerCase() === "true";
+
 // ✅ Initialize FlareSolverr client
 let flareSolverr: FlareSolverrClient | null = null;
 if (ENABLE_CLOUDFLARE_BYPASS) {
@@ -43,6 +47,13 @@ console.log(`[Playwright] Cache system: ${cache.isEnabled() ? "✅ ENABLED" : "�
 
 // ✅ Initialize Retry Handler
 const retryHandler = new RetryHandler();
+
+// ✅ Initialize Visual Diff Detector (only if enabled)
+let visualDiffDetector: VisualDiffDetector | null = null;
+if (VISUAL_CHECK_ENABLED) {
+	visualDiffDetector = new VisualDiffDetector();
+	console.log("[Playwright] ✓ Visual Diff monitoring system enabled");
+}
 
 class Semaphore {
 	private permits: number;
@@ -110,7 +121,9 @@ interface UrlModel {
 	bypass_cloudflare?: boolean;
 	cookies?: any[];
 	use_cache?: boolean;
-	max_retries?: number; // ✅ Added max_retries parameter
+	max_retries?: number;
+	monitor_changes?: boolean;
+	visual_threshold?: number;
 }
 
 let browser: Browser;
@@ -228,7 +241,6 @@ const scrapePage = async (page: Page, url: string, waitUntil: "load" | "networki
 		}
 	}
 
-	// ✅ If status code indicates temporary error, throw for RetryHandler to catch
 	if (response && (response.status() === 429 || (response.status() >= 500 && response.status() < 600))) {
 		const error: any = new Error(`Scrape failed with retryable status: ${response.status()}`);
 		error.status = response.status();
@@ -260,6 +272,7 @@ app.get("/health", async (req: Request, res: Response) => {
 			activePages: MAX_CONCURRENT_PAGES - pageSemaphore.getAvailablePermits(),
 			flareSolverrEnabled: ENABLE_CLOUDFLARE_BYPASS,
 			cacheEnabled: CACHE_ENABLED,
+			visualCheckEnabled: VISUAL_CHECK_ENABLED, // ✅ Added to health check
 		});
 	} catch (error) {
 		console.error("Health check failed:", error);
@@ -281,7 +294,9 @@ app.post("/scrape", async (req: Request, res: Response) => {
 		bypass_cloudflare = ENABLE_CLOUDFLARE_BYPASS,
 		cookies,
 		use_cache = CACHE_ENABLED,
-		max_retries, // ✅ Added for per-request retry control
+		max_retries,
+		monitor_changes = VISUAL_CHECK_ENABLED, // ✅ Defaults to env setting
+		visual_threshold = 0.1,
 	}: UrlModel = req.body;
 
 	console.log(`================= Scrape Request =================`);
@@ -293,6 +308,7 @@ app.post("/scrape", async (req: Request, res: Response) => {
 	console.log(`Skip TLS Verification: ${skip_tls_verification}`);
 	console.log(`Bypass Cloudflare: ${bypass_cloudflare}`);
 	console.log(`Use Cache: ${use_cache}`);
+	console.log(`Monitor Changes: ${monitor_changes}`);
 	console.log(`==================================================`);
 
 	if (!url || !isValidUrl(url)) {
@@ -354,16 +370,35 @@ app.post("/scrape", async (req: Request, res: Response) => {
 
 		const pageError = result.status !== 200 ? getError(result.status) : undefined;
 
+		// ✅ 3. Visual Diff / Change Detection Logic (only if enabled via env or body)
+		let changeDetection: any = null;
+		if (monitor_changes && VISUAL_CHECK_ENABLED && cache.isEnabled() && visualDiffDetector) {
+			console.log(`[VisualDiff] Checking for changes on: ${url}`);
+			const screenshotKey = `screenshot:${Buffer.from(url).toString("base64")}`;
+			const prevScreenshotData = await cache.get(screenshotKey, { type: "visual" });
+			const prevBuffer = prevScreenshotData ? Buffer.from(prevScreenshotData, "base64") : undefined;
+
+			const diff = await visualDiffDetector.detectChange(page, prevBuffer, visual_threshold);
+
+			changeDetection = {
+				changed: diff.changed,
+				diffPercent: diff.diffPercent,
+			};
+
+			await cache.set(screenshotKey, diff.currentScreenshot.toString("base64"), { type: "visual" });
+		}
+
 		const responseData = {
 			content: result.content,
 			pageStatusCode: result.status,
 			contentType: result.contentType,
 			cookiesUsed: injectedCookies.length,
 			cached: false,
+			...(changeDetection && { changeDetection }),
 			...(pageError && { pageError }),
 		};
 
-		// ✅ 3. Save to Cache
+		// ✅ 4. Save to Cache
 		if (result.status === 200 && use_cache && cache.isEnabled()) {
 			await cache.set(url, responseData, cacheKey);
 		}
@@ -389,6 +424,7 @@ app.listen(port, () => {
 	initializeBrowser().then(() => {
 		console.log(`Server is running on port ${port}`);
 		console.log(`FlareSolverr Cloudflare bypass: ${ENABLE_CLOUDFLARE_BYPASS ? "✅ ENABLED" : "❌ DISABLED"}`);
+		console.log(`Visual monitoring: ${VISUAL_CHECK_ENABLED ? "✅ ENABLED" : "❌ DISABLED"}`); // ✅ Log init status
 	});
 });
 
