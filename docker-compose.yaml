@@ -158,7 +158,7 @@ services:
       - backend # Internal communication only
     volumes:
       - redis_data:/data
-    command: redis-server --bind 0.0.0.0 --appendonly yes --maxmemory 512mb --maxmemory-policy allkeys-lru
+    command: redis-server --bind 0.0.0.0 --maxmemory 2gb --maxmemory-policy noeviction
     deploy:
       resources:
         limits:
