@@ -268,7 +268,8 @@ const workerFun = async (
       break;
     }
     const token = uuidv7();
-    const canAcceptConnection = await monitor.acceptConnection();
+    // const canAcceptConnection = await monitor.acceptConnection();
+    const canAcceptConnection = true;
     if (!canAcceptConnection) {
       console.log("Can't accept connection due to RAM/CPU load");
       logger.info("Can't accept connection due to RAM/CPU load");
