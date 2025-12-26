@@ -72,11 +72,15 @@ services:
       BLOCK_MEDIA: ${BLOCK_MEDIA}
       # Configure maximum concurrent pages for Playwright browser instances
       MAX_CONCURRENT_PAGES: ${CRAWL_CONCURRENT_REQUESTS:-10}
-      FLARESOLVERR_URL: http://flaresolverr:8191
-      ENABLE_CLOUDFLARE_BYPASS: true
-      REDIS_URL: redis://redis:6379
-      CACHE_ENABLED: true
+      FLARESOLVERR_URL: ${FLARESOLVERR_URL}
+      ENABLE_CLOUDFLARE_BYPASS: ${ENABLE_CLOUDFLARE_BYPASS}
+      REDIS_URL: ${REDIS_URL}
+      CACHE_ENABLED: ${CACHE_ENABLED}
       CACHE_TTL: 3600
+      VISUAL_CHECK_ENABLED: ${VISUAL_CHECK_ENABLED}
+      RETRY_MAX_RETRIES: ${RETRY_MAX_RETRIES}
+      RETRY_BASE_DELAY_MS: ${RETRY_BASE_DELAY_MS}
+      RETRY_MAX_DELAY_MS: ${RETRY_MAX_DELAY_MS}
     depends_on:
       redis:
         condition: service_started
