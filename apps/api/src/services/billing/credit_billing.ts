@@ -78,6 +78,41 @@ async function supaCheckTeamCredits(
     throw new Error("NULL ACUC passed to supaCheckTeamCredits");
   }
 
+  // If team is part of an organization, skip credit checks
+  try {
+    const orgCacheKey = `team_org_${team_id}`;
+    let isPartOfOrganization = false;
+    const cachedOrgData = await getValue(orgCacheKey);
+    if (cachedOrgData !== null) {
+      isPartOfOrganization = cachedOrgData === "true";
+    } else {
+      const { data: orgData } = await supabase_rr_service
+        .from("organizations")
+        .select("id")
+        .eq("team_id", team_id)
+        .limit(1)
+        .single();
+
+      isPartOfOrganization = !!orgData;
+      await setValue(orgCacheKey, isPartOfOrganization ? "true" : "false", 300); // Cache for 5 minutes
+    }
+
+    if (isPartOfOrganization) {
+      return {
+        success: true,
+        message: "Credit checks skipped for organization team",
+        remainingCredits: Infinity,
+        chunk,
+      };
+    }
+  } catch (error) {
+    // If organization check fails, continue with normal credit checks
+    logger.warn(
+      "Organization check failed, continuing with normal credit checks",
+      { team_id, error },
+    );
+  }
+
   // If bypassCreditChecks flag is set, return success with infinite credits (infinitely graceful)
   if (chunk.flags?.bypassCreditChecks) {
     return {
@@ -180,6 +215,29 @@ async function supaCheckTeamCredits(
 
   // Compare the adjusted total credits used with the credits allowed by the plan (and graceful)
   if (creditsWillBeUsed > totalPriceCredits) {
+    logger.warn("Credit check failed - insufficient credits", {
+      team_id,
+      teamId: team_id,
+      creditsRequested: credits,
+      is_extract: chunk.is_extract,
+      bypassCreditChecks: chunk.flags?.bypassCreditChecks,
+      price_should_be_graceful: chunk.price_should_be_graceful,
+      price_credits: chunk.price_credits,
+      coupon_credits: chunk.coupon_credits,
+      total_credits_sum: chunk.total_credits_sum,
+      credits_used: chunk.credits_used,
+      adjusted_credits_used: chunk.adjusted_credits_used,
+      remaining_credits: chunk.remaining_credits,
+      sub_current_period_start: chunk.sub_current_period_start,
+      sub_current_period_end: chunk.sub_current_period_end,
+      computed_remainingCredits: remainingCredits,
+      computed_creditsWillBeUsed: creditsWillBeUsed,
+      computed_totalPriceCredits: totalPriceCredits,
+      creditUsagePercentage,
+      sumComponents: chunk.price_credits + chunk.coupon_credits,
+      isAutoRechargeEnabled,
+      autoRechargeThreshold,
+    });
     return {
       success: false,
       message:

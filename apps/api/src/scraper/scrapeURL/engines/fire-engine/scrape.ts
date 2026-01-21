@@ -2,7 +2,7 @@ import { Logger } from "winston";
 import * as Sentry from "@sentry/node";
 import { z } from "zod";
 
-import { Action } from "../../../../controllers/v1/types";
+import { InternalAction } from "../../../../controllers/v1/types";
 import { robustFetch } from "../../lib/fetch";
 import { MockState } from "../../lib/mock";
 import { getDocFromGCS } from "../../../../lib/gcs-jobs";
@@ -18,6 +18,7 @@ import {
 } from "../../error";
 import { Meta } from "../..";
 import { abTestFireEngine } from "../../../../services/ab-test";
+import { scheduleABComparison } from "../../../../services/ab-test-comparison";
 
 import { config } from "../../../../config";
 export type FireEngineScrapeRequestCommon = {
@@ -50,7 +51,7 @@ export type FireEngineScrapeRequestCommon = {
 export type FireEngineScrapeRequestChromeCDP = {
   engine: "chrome-cdp";
   skipTlsVerification?: boolean;
-  actions?: Action[];
+  actions?: InternalAction[];
   blockMedia?: boolean;
   mobile?: boolean;
   disableSmartWaitCache?: boolean;
@@ -187,7 +188,8 @@ export async function fireEngineScrape<
   abort?: AbortSignal,
   production = true,
 ): Promise<z.infer<typeof processingSchema> | FireEngineCheckStatusSuccess> {
-  abTestFireEngine(request);
+  const abTest = abTestFireEngine(request);
+  const productionStartTime = Date.now();
 
   let status = await robustFetch({
     url: `${production ? fireEngineURL : fireEngineStagingURL}/scrape`,
@@ -216,6 +218,22 @@ export async function fireEngineScrape<
 
   if (successParse.success) {
     logger.debug("Scrape succeeded!");
+
+    // Schedule A/B comparison if enabled (fire-and-forget)
+    if (abTest.shouldCompare && abTest.mirrorPromise) {
+      const productionTimeTaken = Date.now() - productionStartTime;
+      scheduleABComparison(
+        meta.url,
+        {
+          content: successParse.data.content,
+          pageStatusCode: successParse.data.pageStatusCode,
+        },
+        productionTimeTaken,
+        abTest.mirrorPromise,
+        logger,
+      );
+    }
+
     return successParse.data;
   } else if (processingParse.success) {
     return processingParse.data;

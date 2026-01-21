@@ -441,6 +441,7 @@ export class WebCrawler {
     timeout: number = 120000,
     abort?: AbortSignal,
     mock?: string,
+    maxAge: number = SITEMAP_MAX_AGE,
   ): Promise<number> {
     this.logger.debug(`Fetching sitemap links from ${this.initialUrl}`, {
       method: "tryGetSitemap",
@@ -523,16 +524,10 @@ export class WebCrawler {
             _urlsHandler,
             abort,
             mock,
-            SITEMAP_MAX_AGE,
+            maxAge,
           ),
           ...robotsSitemaps.map(x =>
-            this.tryFetchSitemapLinks(
-              x,
-              _urlsHandler,
-              abort,
-              mock,
-              SITEMAP_MAX_AGE,
-            ),
+            this.tryFetchSitemapLinks(x, _urlsHandler, abort, mock, maxAge),
           ),
         ]).then(results => results.reduce((a, x) => a + x, 0)),
         timeoutPromise,

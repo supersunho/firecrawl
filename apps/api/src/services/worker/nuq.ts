@@ -181,47 +181,75 @@ class NuQ<JobData = any, JobReturnValue = any> {
         },
       );
     } else {
-      this.listener = {
-        type: "postgres",
-        client: new Client({
-          connectionString:
-            config.NUQ_DATABASE_URL_LISTEN ?? config.NUQ_DATABASE_URL, // will always be a direct connection
-          application_name: "nuq_listener",
-        }),
-      };
+      this.listenerStarting = true;
 
-      this.listener.client.on("notification", msg => {
-        const tok = (msg.payload ?? "unknown|unknown").split("|");
-        if (tok[0] in this.listens) {
-          this.listens[tok[0]].forEach(listener =>
-            listener(tok[1] as "completed" | "failed"),
-          );
-          delete this.listens[tok[0]];
-        }
-      });
+      try {
+        this.listener = {
+          type: "postgres",
+          client: new Client({
+            connectionString:
+              config.NUQ_DATABASE_URL_LISTEN ?? config.NUQ_DATABASE_URL, // will always be a direct connection
+            application_name: "nuq_listener",
+          }),
+        };
 
-      this.listener.client.on("error", err =>
-        logger.error("Error in NuQ listener", { err, module: "nuq" }),
-      );
+        let reconnectTimeout: NodeJS.Timeout | null = null;
 
-      this.listener.client.on("end", () => {
-        logger.info("NuQ listener disconnected", { module: "nuq" });
-        this.listener = null;
-        setTimeout(
-          (() => {
-            this.startListener().catch(err =>
-              logger.error("Error in NuQ listener reconnect", {
-                err,
-                module: "nuq",
-              }),
+        this.listener.client.on("notification", msg => {
+          const tok = (msg.payload ?? "unknown|unknown").split("|");
+          if (tok[0] in this.listens) {
+            this.listens[tok[0]].forEach(listener =>
+              listener(tok[1] as "completed" | "failed"),
             );
-          }).bind(this),
-          250,
-        );
-      });
+            delete this.listens[tok[0]];
+          }
+        });
 
-      await this.listener.client.connect();
-      await this.listener.client.query(`LISTEN "${this.queueName}";`);
+        this.listener.client.on("error", err => {
+          logger.error("Error in NuQ listener", { err, module: "nuq" });
+          // Trigger cleanup and reconnection on error
+          if (this.listener && this.listener.type === "postgres") {
+            const nl = this.listener;
+            this.listener = null;
+            nl.client.end().catch(() => {});
+            if (reconnectTimeout) clearTimeout(reconnectTimeout);
+            reconnectTimeout = setTimeout(
+              (() => {
+                this.startListener().catch(err =>
+                  logger.error("Error in NuQ listener reconnect", {
+                    err,
+                    module: "nuq",
+                  }),
+                );
+              }).bind(this),
+              250,
+            );
+          }
+        });
+
+        this.listener.client.on("end", () => {
+          logger.info("NuQ listener disconnected", { module: "nuq" });
+          this.listener = null;
+
+          if (reconnectTimeout) clearTimeout(reconnectTimeout);
+          reconnectTimeout = setTimeout(
+            (() => {
+              this.startListener().catch(err =>
+                logger.error("Error in NuQ listener reconnect", {
+                  err,
+                  module: "nuq",
+                }),
+              );
+            }).bind(this),
+            250,
+          );
+        });
+
+        await this.listener.client.connect();
+        await this.listener.client.query(`LISTEN "${this.queueName}";`);
+      } finally {
+        this.listenerStarting = false;
+      }
     }
 
     (async () => {
@@ -355,7 +383,7 @@ class NuQ<JobData = any, JobReturnValue = any> {
         {
           correlationId: job.id,
           persistent: true,
-          expiration: "15000", // has to expire in 15s otherwise locks will fail to be acquired for jobs that got picked up late
+          expiration: "50000", // must be less than lock reaper timeout (1 min) to minimize dead zone where jobs are expired from RabbitMQ but still "active" in DB
         },
       );
       _logger.info("NuQ job prefetch sent", { module: "nuq/rabbitmq" });

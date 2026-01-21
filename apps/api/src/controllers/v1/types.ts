@@ -368,6 +368,12 @@ const actionSchema = z.union([
 
 export type Action = z.infer<typeof actionSchema>;
 
+export type InternalAction = Action & {
+  metadata?: {
+    [key: string]: unknown;
+  };
+};
+
 const actionsSchema = z
   .array(actionSchema)
   .refine(actions => actions.length <= MAX_ACTIONS, {
@@ -945,6 +951,7 @@ const mapRequestSchemaBase = crawlerOptions
     useMock: z.string().optional(),
     filterByPath: z.boolean().prefault(true),
     useIndex: z.boolean().prefault(true),
+    ignoreCache: z.boolean().prefault(false),
     location: locationSchema,
     headers: z.record(z.string(), z.string()).optional(),
   });
@@ -1528,6 +1535,7 @@ export type SearchResponse =
       success: true;
       warning?: string;
       data: Document[];
+      id: string;
     };
 
 export type TokenUsage = {

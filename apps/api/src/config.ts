@@ -71,8 +71,9 @@ const configSchema = z.object({
   // Fire Engine
   FIRE_ENGINE_BETA_URL: z.string().optional(),
   FIRE_ENGINE_STAGING_URL: z.string().optional(),
-  FIRE_ENGINE_AB_HOST: z.string().optional(),
+  FIRE_ENGINE_AB_URL: z.string().optional(),
   FIRE_ENGINE_AB_RATE: z.coerce.number().optional(),
+  FIRE_ENGINE_AB_COMPARE_ENABLED: z.stringbool().default(false),
 
   // ScrapeURL
   SCRAPEURL_AB_HOST: z.string().optional(),
@@ -195,6 +196,8 @@ const configSchema = z.object({
 
   EXTRACT_V3_BETA_URL: z.string().optional(),
   AGENT_INTEROP_SECRET: z.string().optional(),
+
+  NUQ_PREFETCH_WORKER_HEARTBEAT_URL: z.string().optional(),
 });
 
 export const config = configSchema.parse(process.env);

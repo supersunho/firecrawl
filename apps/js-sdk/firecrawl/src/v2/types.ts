@@ -167,6 +167,16 @@ export interface WebhookConfig {
   events?: Array<'completed' | 'failed' | 'page' | 'started'>;
 }
 
+// Agent webhook events differ from crawl: has 'action' and 'cancelled', no 'page'
+export type AgentWebhookEvent = 'started' | 'action' | 'completed' | 'failed' | 'cancelled';
+
+export interface AgentWebhookConfig {
+  url: string;
+  headers?: Record<string, string>;
+  metadata?: Record<string, string>;
+  events?: AgentWebhookEvent[];
+}
+
 export interface BrandingProfile {
   colorScheme?: 'light' | 'dark';
   logo?: string | null;
@@ -631,17 +641,36 @@ export class SdkError extends Error {
   status?: number;
   code?: string;
   details?: unknown;
+  jobId?: string;
   constructor(
     message: string,
     status?: number,
     code?: string,
-    details?: unknown
+    details?: unknown,
+    jobId?: string
   ) {
     super(message);
     this.name = 'FirecrawlSdkError';
     this.status = status;
     this.code = code;
     this.details = details;
+    this.jobId = jobId;
+  }
+}
+
+export class JobTimeoutError extends SdkError {
+  timeoutSeconds: number;
+  constructor(jobId: string, timeoutSeconds: number, jobType: 'batch' | 'crawl' = 'batch') {
+    const jobTypeLabel = jobType === 'batch' ? 'batch scrape' : 'crawl';
+    super(
+      `${jobTypeLabel.charAt(0).toUpperCase() + jobTypeLabel.slice(1)} job ${jobId} did not complete within ${timeoutSeconds} seconds`,
+      undefined,
+      'JOB_TIMEOUT',
+      undefined,
+      jobId
+    );
+    this.name = 'JobTimeoutError';
+    this.timeoutSeconds = timeoutSeconds;
   }
 }
 
